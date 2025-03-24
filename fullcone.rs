@@ -10,7 +10,7 @@ use core::net::Ipv4Addr;
 module! {
     type: NftFullconeModule,
     name: "nft_fullcone",
-    author: "Syrone Wong <wong.syrone@gmail.com>",
+    author: "yyjeqhc <1772413353@qq.com>",
     description: "Netfilter nftables fullcone expression support in Rust",
     license: "GPL",
 }

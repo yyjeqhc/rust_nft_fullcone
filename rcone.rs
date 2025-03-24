@@ -10,7 +10,7 @@ use core::net::Ipv4Addr;
 module! {
     type: NftRconeModule,
     name: "nft_rcone",
-    author: "Syrone Wong <wong.syrone@gmail.com>",
+    author: "yyjeqhc <1772413353@qq.com>",
     description: "Netfilter nftables rcone expression support in Rust",
     license: "GPL",
 }
