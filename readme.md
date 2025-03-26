@@ -25,4 +25,4 @@ nft add rule ip nat POSTROUTING oifname "tailscale0" prcone
 仅实验目的，没有支持其他功能。
 此外，使用此模块可能会导致系统崩溃，请谨慎使用。
 ```
-
+### nat文件夹下为基于nft_fullcone进行修改的fullcone、rcone及prcone
