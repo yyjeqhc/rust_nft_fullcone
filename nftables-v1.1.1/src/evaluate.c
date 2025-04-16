@@ -87,6 +87,12 @@ static const char *stmt_name(const struct stmt *stmt)
 			return "redirect";
 		case NFT_NAT_MASQ:
 			return "masquerade";
+		case NFT_NAT_FULLCONE:
+			return "fullcone";
+		case NFT_NAT_RCONE:
+			return "rcone";
+		case NFT_NAT_PRCONE:
+			return "prcone";
 		}
 		break;
 	default:
