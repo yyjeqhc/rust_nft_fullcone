@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/*
+ * Nftables NAT extension: fullcone expression support library header
+ *
+ * Copyright (c) 2018 Chion Tang <tech@chionlab.moe>
+ *   Original xt_FULLCONENAT and related iptables extension author
+ * Copyright (c) 2019-2022 GitHub/llccd Twitter/@gNodeB
+ *   Added IPv6 support for xt_FULLCONENAT and ip6tables extension
+ *   Ported to recent kernel versions
+ * Copyright (c) 2022 Syrone Wong <wong.syrone@gmail.com>
+ *   Massively rewrite the whole module, split the original code into library and nftables 'fullcone' expression module
+ * Copyright (c) 2025 yyjeqhc <1772413353@qq.com>
+ *   Extended the nat_mapping(6) struct to store the destination IP and port (external address) of packets.
+ * 	 Making it easier for NAT2 and NAT3 to validate external IP addresses and port numbers.
+ */
 
 #define pr_fmt(fmt) "prcone " KBUILD_MODNAME ": " fmt
 
@@ -1197,15 +1213,15 @@ static unsigned int nf_nat_handle_prerouting(u8 nfproto, struct sk_buff *skb, un
 		} else {
 
 			//do check for rcone or prcone
-			pr_debug("NAT Mapping:\n");
-			pr_debug("  External Source: %pI4:%d\n", &mapping->addr, ntohs(mapping->port));
-			pr_debug("  Internal Source: %pI4:%d\n", &mapping->int_addr, ntohs(mapping->int_port));
-			pr_debug("  External Dest: %pI4:%d\n", &mapping->ext_addr, ntohs((uint16_t)mapping->ext_port));
+			//pr_debug("NAT Mapping:\n");
+			//pr_debug("  External Source: %pI4:%d\n", &mapping->addr, ntohs(mapping->port));
+			//pr_debug("  Internal Source: %pI4:%d\n", &mapping->int_addr, ntohs(mapping->int_port));
+			//pr_debug("  External Dest: %pI4:%d\n", &mapping->ext_addr, ntohs((uint16_t)mapping->ext_port));
 
-			// ��ӡ ct_tuple_origin ��Դ��ַ��Դ�˿�
+			// 
 			__be32 src_ip = ct_tuple_origin->src.u3.ip;
-			__u16 src_port = ntohs(ct_tuple_origin->src.u.udp.port); // ���� udp
-			pr_debug("ct_tuple_origin Source: %pI4:%d\n", &src_ip, src_port);
+			__u16 src_port = ntohs(ct_tuple_origin->src.u.udp.port); // 
+			//pr_debug("ct_tuple_origin Source: %pI4:%d\n", &src_ip, src_port);
 
 			//rone
 			// if (!(mapping->ext_addr==src_ip)){
@@ -1221,16 +1237,16 @@ static unsigned int nf_nat_handle_prerouting(u8 nfproto, struct sk_buff *skb, un
 		if (mapping_6 == NULL) {
 			goto unlock;
 		} else {
-			// ��ӡ NAT Mapping (IPv6)
-			pr_warn("preroutin NAT Mapping (IPv6):\n");
-			pr_warn("  External Source: %pI6:%d\n", &mapping_6->addr.in6, ntohs(mapping_6->port));
-			pr_warn("  Internal Source: %pI6:%d\n", &mapping_6->int_addr.in6, ntohs(mapping_6->int_port));
-			pr_warn("  External Dest: %pI6:%d\n", &mapping_6->ext_addr.in6, ntohs(mapping_6->ext_port));
+			//
+			//pr_warn("preroutin NAT Mapping (IPv6):\n");
+			//pr_warn("  External Source: %pI6:%d\n", &mapping_6->addr.in6, ntohs(mapping_6->port));
+			//pr_warn("  Internal Source: %pI6:%d\n", &mapping_6->int_addr.in6, ntohs(mapping_6->int_port));
+			//pr_warn("  External Dest: %pI6:%d\n", &mapping_6->ext_addr.in6, ntohs(mapping_6->ext_port));
 	
-			// ��ӡ ct_tuple_origin ��Դ��ַ��Դ�˿� (IPv6)
+			// 
 			struct in6_addr *src_ip6 = &ct_tuple_origin->src.u3.in6;
-			__u16 src_port = ntohs(ct_tuple_origin->src.u.udp.port); // ���� UDP
-			pr_warn("ct_tuple_origin Source: %pI6:%d\n", src_ip6, src_port);
+			__u16 src_port = ntohs(ct_tuple_origin->src.u.udp.port); //
+			//pr_warn("ct_tuple_origin Source: %pI6:%d\n", src_ip6, src_port);
 	
 			//rcone
 			// if (!ipv6_addr_equal(&mapping_6->ext_addr.in6, &ct_tuple_origin->src.u3.in6)) {
@@ -1518,8 +1534,8 @@ static unsigned int nf_nat_handle_postrouting(u8 nfproto, struct sk_buff *skb, u
 	if (nfproto == NFPROTO_IPV4) {
 		mapping = src_mapping;
 		if (mapping == NULL) {
-			// __be32 dst_ip = ct_tuple_origin->dst.u3.ip;        // Ŀ�� IP (�����ֽ���)
-    		// __u16 dst_port = ntohs(ct_tuple_origin->dst.u.tcp.port); // Ŀ�Ķ˿� (�����ֽ���)
+			// __be32 dst_ip = ct_tuple_origin->dst.u3.ip;        
+    		// __u16 dst_port = ntohs(ct_tuple_origin->dst.u.tcp.port); 
 			mapping = allocate_mapping(ip, original_port, port, (ct_tuple->dst).u3.ip,ct_tuple_origin->dst.u3.ip,ntohs(ct_tuple_origin->dst.u.udp.port));
 		}
 		if (likely(mapping != NULL)) {

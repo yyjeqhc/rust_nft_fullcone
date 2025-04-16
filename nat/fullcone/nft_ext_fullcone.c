@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+/*
+ * Nftables NAT extension: fullcone expression support library header
+ *
+ * Copyright (c) 2018 Chion Tang <tech@chionlab.moe>
+ *   Original xt_FULLCONENAT and related iptables extension author
+ * Copyright (c) 2019-2022 GitHub/llccd Twitter/@gNodeB
+ *   Added IPv6 support for xt_FULLCONENAT and ip6tables extension
+ *   Ported to recent kernel versions
+ * Copyright (c) 2022 Syrone Wong <wong.syrone@gmail.com>
+ *   Massively rewrite the whole module, split the original code into library and nftables 'fullcone' expression module
+ * Copyright (c) 2025 yyjeqhc <1772413353@qq.com>
+ *   Extended the nat_mapping(6) struct to store the destination IP and port (external address) of packets.
+ * 	 Making it easier for NAT2 and NAT3 to validate external IP addresses and port numbers.
+ */
 
 #define pr_fmt(fmt) "fullcone " KBUILD_MODNAME ": " fmt
 #define NF_FULLCONE_WORKQUEUE_NAME "fullcone " KBUILD_MODNAME ": wq"
