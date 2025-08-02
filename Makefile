@@ -1,4 +1,7 @@
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+
+#为非系统内核编译模块
+# KERNELDIR ?= /root/micro/linux
 PWD := $(shell pwd)
 
 obj-m := fullcone.o

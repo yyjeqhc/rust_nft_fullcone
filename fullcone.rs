@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Rust implementation of nftables fullcone expression support.
 
-use core::ffi;
 use kernel::prelude::*;
-use kernel::alloc::flags;
-use kernel::bindings::{self, *};
-use core::net::Ipv4Addr;
+use kernel::alloc::{flags, KBox};
+use kernel::bindings;
 
 module! {
     type: NftFullconeModule,
@@ -15,8 +13,8 @@ module! {
     license: "GPL",
 }
 
-// 定义 NAT 映射结构体，与 xt_fullcone 示例一致
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 struct NatMapping {
     int_addr: u32,      // 内部地址 (big-endian)
     int_port: u16,      // 内部端口 (big-endian)
@@ -26,58 +24,83 @@ struct NatMapping {
     ext_port: u16,      // 外部端口 (big-endian)
 }
 
-// 全局静态映射表
-static mut MAPPINGS: KVec<NatMapping> = KVec::new();
-
-// 模块主结构体，只存储指针
-struct NftFullconeModule {
-    expr_ops_ipv4: u64,   // nft_expr_ops 指针
-    expr_type_ipv4: u64,  // nft_expr_type 指针
+struct LockedKVec {
+    lock: bindings::spinlock_t,
+    data: KVec<NatMapping>,
 }
 
+static mut MAPPINGS: *mut LockedKVec = core::ptr::null_mut();
+
+struct NftFullconeModule {
+    expr_type_ptr: u64,
+    expr_ops_ptr: u64,
+    policy_ptr: u64,
+}
 
 impl kernel::Module for NftFullconeModule {
     fn init(_module: &'static ThisModule) -> Result<Self> {
         pr_info!("nft_fullcone: module being initialized\n");
-
-        // 创建 nft_expr_ops
-        let mut expr_ops = KBox::new(nft_fullcone_ipv4_ops(), flags::GFP_KERNEL)?;
-        let expr_ops_ptr = KBox::into_raw(expr_ops) as u64;
-
-        // 创建并设置 nft_expr_type
-        let mut expr_type = KBox::new(nft_expr_type::default(), flags::GFP_KERNEL)?;
-        expr_type.name = "fullcone\0".as_ptr() as *const u8;
-        expr_type.family = NFPROTO_IPV4 as u8;
-        expr_type.ops = expr_ops_ptr as *const nft_expr_ops;
-        expr_type.policy = nft_fullcone_policy().as_ptr() as *const _;
-        // expr_type.maxattr = NftFullconeAttributes::NFTA_FULLCONE_MAX as u32;
-        expr_type.maxattr = 3;
-
-        expr_type.owner = unsafe { &mut __this_module as *mut _ };
-
         
-
-        let expr_type_ptr = KBox::into_raw(expr_type);
+        static mut MAPPINGS_KEY: bindings::lock_class_key = unsafe { core::mem::zeroed() };
+        
+        let locked_kvec = KBox::new(LockedKVec {
+            lock: unsafe { core::mem::zeroed() }, 
+            data: KVec::new(),
+        }, flags::GFP_KERNEL)?;
 
         unsafe {
-            let mut t = KBox::from_raw(expr_ops_ptr as *mut nft_expr_ops);
-            t.type_ = expr_type_ptr as *const _;
-            KBox::into_raw(t);
+            MAPPINGS = KBox::into_raw(locked_kvec);
+            let name = b"nft_fullcone_lock\0".as_ptr();
+            
+            // 修复: 使用 `&raw mut` 来创建裸指针，而不是 `&mut`
+            bindings::__spin_lock_init(
+                &mut (*MAPPINGS).lock,
+                name,
+                &raw mut MAPPINGS_KEY,
+            );
         }
 
-        let ret = unsafe { bindings::nft_register_expr(expr_type_ptr) };
-        // if ret != 0 {
-        //     unsafe {
-        //         KBox::from_raw(expr_ops_ptr as *mut nft_expr_ops);
-        //         KBox::from_raw(expr_type_ptr);
-        //     }
-        //     return Err(kernel::error::Error::from_errno(ret));
-        // }
+        let policy = KBox::new([bindings::nla_policy::default(); 4], flags::GFP_KERNEL)?;
+        let mut expr_ops = KBox::new(nft_fullcone_ipv4_ops(), flags::GFP_KERNEL)?;
+        let mut expr_type = KBox::new(bindings::nft_expr_type::default(), flags::GFP_KERNEL)?;
+
+        let policy_ptr_raw = KBox::into_raw(policy);
+        
+        expr_type.ops = &*expr_ops;
+        expr_type.policy = policy_ptr_raw as *const _; 
+        expr_type.name = b"fullcone\0".as_ptr();
+        expr_type.family = bindings::NFPROTO_IPV4 as u8;
+        expr_type.maxattr = 3;
+
+        // 修复: 移除编译器抱怨的多余的 unsafe 块
+        expr_type.owner = &raw mut bindings::__this_module as *mut _ ;
+        
+        expr_ops.type_ = &*expr_type;
+        
+        let expr_type_ptr_raw = KBox::into_raw(expr_type);
+        let expr_ops_ptr_raw = KBox::into_raw(expr_ops);
+
+        let ret = unsafe { bindings::nft_register_expr(expr_type_ptr_raw) };
+        if ret != 0 {
+            pr_err!("nft_fullcone: failed to register expression: {}\n", ret);
+            unsafe {
+                if !MAPPINGS.is_null() {
+                    let _ = KBox::from_raw(MAPPINGS);
+                    MAPPINGS = core::ptr::null_mut();
+                }
+                let _ = KBox::from_raw(expr_type_ptr_raw);
+                let _ = KBox::from_raw(expr_ops_ptr_raw);
+                let _ = KBox::from_raw(policy_ptr_raw);
+            }
+            return Err(kernel::error::Error::from_errno(ret));
+        }
 
         pr_info!("nft_fullcone: module initialized successfully\n");
+        
         Ok(NftFullconeModule {
-            expr_ops_ipv4: expr_ops_ptr,
-            expr_type_ipv4: expr_type_ptr as u64,
+            expr_type_ptr: expr_type_ptr_raw as u64,
+            expr_ops_ptr: expr_ops_ptr_raw as u64,
+            policy_ptr: policy_ptr_raw as u64,
         })
     }
 }
@@ -85,261 +108,133 @@ impl kernel::Module for NftFullconeModule {
 impl Drop for NftFullconeModule {
     fn drop(&mut self) {
         pr_info!("nft_fullcone: module being removed\n");
-
         unsafe {
-            bindings::nft_unregister_expr(self.expr_type_ipv4 as *mut nft_expr_type);
-            let expr_os = KBox::from_raw(self.expr_ops_ipv4 as *mut nft_expr_ops);  // 释放 ops
-            let expr_type = KBox::from_raw(self.expr_type_ipv4 as *mut nft_expr_type); // 释放 type
-        }
+            bindings::nft_unregister_expr(self.expr_type_ptr as *mut bindings::nft_expr_type);
+            
+            let _ = KBox::from_raw(self.expr_type_ptr as *mut bindings::nft_expr_type);
+            let _ = KBox::from_raw(self.expr_ops_ptr as *mut bindings::nft_expr_ops);
+            let _ = KBox::from_raw(self.policy_ptr as *mut [bindings::nla_policy; 4]);
 
-        pr_info!("nft_fullcone: mappings cleared\n");
+            if !MAPPINGS.is_null() {
+                let _ = KBox::from_raw(MAPPINGS);
+                MAPPINGS = core::ptr::null_mut();
+            }
+        }
+        pr_info!("nft_fullcone: module removed\n");
     }
 }
 
-// // NAT 表达式私有数据
-// #[repr(C)]
-// struct NftFullcone {
-//     flags: u32,
-//     sreg_proto_min: u8,
-//     sreg_proto_max: u8,
-// }
-
-// 获取设备 IP 地址
-fn get_device_ip(device: &net_device) -> u32 {
+fn get_device_ip(device: &bindings::net_device) -> u32 {
     unsafe {
         bindings::__rcu_read_lock();
-        let in_dev = device.ip_ptr;
-        if in_dev.is_null() {
-            bindings::__rcu_read_unlock();
-            return 0;
-        }
-        let if_info = (*in_dev).ifa_list;
-        if if_info.is_null() {
-            bindings::__rcu_read_unlock();
-            return 0;
-        }
-        let ip = (*if_info).ifa_local;
+        let in_dev = (*device).ip_ptr;
+        if in_dev.is_null() { bindings::__rcu_read_unlock(); return 0; }
+        let ifa_list = (*in_dev).ifa_list;
+        if ifa_list.is_null() { bindings::__rcu_read_unlock(); return 0; }
+        let ip = (*ifa_list).ifa_local;
         bindings::__rcu_read_unlock();
-        // pr_info!("device ip: {}\n", Ipv4Addr::from_bits(ip.to_be()));
-        ip // 返回 big-endian IP
+        ip
     }
 }
 
-// 简单端口选择逻辑
 fn get_proper_port(src_port: u16) -> u16 {
-    if src_port == 0 {
-        1024_u16.to_be() // 默认使用 1024
-    } else {
-        src_port.to_be()
-    }
+    if src_port == 0 { 1024u16.to_be() } else { src_port }
 }
 
-// 设置 NAT 范围
-fn nft_fullcone_set_regs(expr: *const nft_expr, regs: *const nft_regs, range: &mut nf_nat_range2) {
-    // unsafe {
-    //     let priv = bindings::nft_expr_priv(expr) as *const NftFullcone;
-    //     range.flags = (*priv).flags;
-    //     if (*priv).sreg_proto_min != 0 {
-    //         range.min_proto.all = bindings::nft_reg_load16(&(*regs).data[(*priv).sreg_proto_min as usize]) as u16;
-    //         range.max_proto.all = bindings::nft_reg_load16(&(*regs).data[(*priv).sreg_proto_max as usize]) as u16;
-    //     }
-    // }
-
-}
-
-// IPv4 fullcone 评估函数
-extern "C" fn nft_fullcone_ipv4_eval(expr: *const nft_expr, regs: *mut nft_regs, pkt: *const nft_pktinfo) {
-    let mut range = nf_nat_range2::default();
+#[allow(non_upper_case_globals)]
+extern "C" fn nft_fullcone_ipv4_eval(_expr: *const bindings::nft_expr, regs: *mut bindings::nft_regs, pkt: *const bindings::nft_pktinfo) {
     unsafe {
-        // nft_fullcone_set_regs(expr, regs, &mut range);
-
+        if MAPPINGS.is_null() { return; }
+        let mappings_lock = &mut *MAPPINGS;
+        
+        let raw_lock = &mut (*mappings_lock).lock as *mut bindings::spinlock_t as *mut bindings::raw_spinlock_t;
+        
+        let mut range = bindings::nf_nat_range2::default();
         let hooknum = bindings::nft_hook(pkt);
-        let skb: *mut sk_buff = (*pkt).skb;
-        let out: *const net_device = bindings::nft_out(pkt);
-
+        let skb: *mut bindings::sk_buff = (*pkt).skb;
 
         let mut ctinfo: u32 = 0;
         let ct = bindings::nf_ct_get(skb, &mut ctinfo);
-        if ct.is_null() {
-            // (*regs).__bindgen_anon_1.verdict.code = NFT_CONTINUE;
-            // pr_err!("is_null \n");
-            return;
-        }
+        if ct.is_null() { return; }
 
-        let ct_tuple_origin = (*ct).tuplehash[ip_conntrack_dir_IP_CT_DIR_ORIGINAL as usize].tuple;
-        let protonum = ct_tuple_origin.dst.protonum as u32;
-        if protonum != IPPROTO_UDP {
-            // pr_err!("protonum {}\n",protonum);
-
-            return;
-        }
+        let ct_tuple_origin = &(*ct).tuplehash[bindings::ip_conntrack_dir_IP_CT_DIR_ORIGINAL as usize].tuple;
+        if ct_tuple_origin.dst.protonum as u32 != bindings::IPPROTO_UDP { return; }
 
         match hooknum {
-            nf_inet_hooks_NF_INET_PRE_ROUTING => {
-                let src_ip = ct_tuple_origin.src.u3.ip.to_be();
-                let src_port = ct_tuple_origin.src.u.udp.port.to_be();
-                let dst_ip = ct_tuple_origin.dst.u3.ip.to_be();
-                let dst_port = ct_tuple_origin.dst.u.udp.port.to_be();
+            bindings::nf_inet_hooks_NF_INET_PRE_ROUTING => {
+                let dst_ip = ct_tuple_origin.dst.u3.ip;
+                let dst_port = ct_tuple_origin.dst.u.udp.port;
                 
-                // pr_err!("nft_fullcone: INBOUND DNAT from {}:{} to {}:{}\n",
-                //             Ipv4Addr::from_bits(src_ip), src_port,
-                //             Ipv4Addr::from_bits(dst_ip), dst_port);
-
-                let mut found = false;
-                for i in 0..MAPPINGS.len() {
-
-                    //port restricted cone
-                    // if MAPPINGS[i].map_ip == dst_ip && MAPPINGS[i].map_port == dst_port 
-                    //     &&MAPPINGS[i].ext_addr == src_ip && MAPPINGS[i].ext_port == src_port
-                    
-                    //restricted cone
-                    // if MAPPINGS[i].map_ip == dst_ip && MAPPINGS[i].map_port == dst_port && MAPPINGS[i].ext_addr == src_ip 
-                    
-                    //fullcone
-                    if MAPPINGS[i].map_ip == dst_ip && MAPPINGS[i].map_port == dst_port 
-                    {
-                        found = true;
-                        range.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
-                        range.min_addr.ip = MAPPINGS[i].int_addr.to_be();
-                        range.max_addr.ip = MAPPINGS[i].int_addr.to_be();
-                        range.min_proto.udp.port = MAPPINGS[i].int_port.to_be();
-                        range.max_proto = range.min_proto;
-
-                        
-                        (*regs).__bindgen_anon_1.verdict.code = bindings::nf_nat_setup_info(ct, &range, HOOK2MANIP(hooknum) as i32);
-                        break;
-                    }
-                }
-                if !found {
-                    // (*regs).__bindgen_anon_1.verdict.code = NFT_CONTINUE;
+                bindings::_raw_spin_lock(raw_lock);
+                let found = mappings_lock.data.iter().find(|m| m.map_ip == dst_ip && m.map_port == dst_port).copied();
+                bindings::_raw_spin_unlock(raw_lock);
+                
+                if let Some(mapping) = found {
+                    range.flags = bindings::NF_NAT_RANGE_MAP_IPS | bindings::NF_NAT_RANGE_PROTO_SPECIFIED;
+                    range.min_addr.ip = mapping.int_addr;
+                    range.max_addr.ip = mapping.int_addr;
+                    range.min_proto.udp.port = mapping.int_port;
+                    range.max_proto = range.min_proto;
+                    (*regs).__bindgen_anon_1.verdict.code = bindings::nf_nat_setup_info(ct, &range, bindings::HOOK2MANIP(hooknum) as i32);
                 }
             }
-            nf_inet_hooks_NF_INET_POST_ROUTING => {
-                let src_ip = ct_tuple_origin.src.u3.ip.to_be();
-                let src_port = ct_tuple_origin.src.u.udp.port.to_be();
-                let dst_ip = ct_tuple_origin.dst.u3.ip.to_be();
-                let dst_port = ct_tuple_origin.dst.u.udp.port.to_be();
+            bindings::nf_inet_hooks_NF_INET_POST_ROUTING => {
+                let src_ip = ct_tuple_origin.src.u3.ip;
+                let src_port = ct_tuple_origin.src.u.udp.port;
+                let dst_ip = ct_tuple_origin.dst.u3.ip;
+                let dst_port = ct_tuple_origin.dst.u.udp.port;
 
-                // pr_err!("nft_fullcone: OUTBOUND SNAT from {}:{} to {}:{}\n",
-                //     Ipv4Addr::from_bits(src_ip), src_port,
-                //     Ipv4Addr::from_bits(dst_ip), dst_port);
-                    
+                let out: *const bindings::net_device = bindings::nft_out(pkt);
                 let map_ip = if !out.is_null() { get_device_ip(&*out) } else { 0 };
                 let map_port = get_proper_port(src_port);
+                
+                if map_ip == 0 { return; }
 
-                // pr_err!("map {}:{}\n", Ipv4Addr::from_bits(map_ip), map_port);
-                range.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
+                range.flags = bindings::NF_NAT_RANGE_MAP_IPS | bindings::NF_NAT_RANGE_PROTO_SPECIFIED;
                 range.min_addr.ip = map_ip;
                 range.max_addr.ip = map_ip;
                 range.min_proto.udp.port = map_port;
                 range.max_proto = range.min_proto;
 
-                let mut exists = false;
-                for i in 0..MAPPINGS.len() {
-                    if MAPPINGS[i].int_addr == src_ip && MAPPINGS[i].int_port == src_port {
-                        exists = true;
-                        break;
+                bindings::_raw_spin_lock(raw_lock);
+                if !mappings_lock.data.iter().any(|m| m.int_addr == src_ip && m.int_port == src_port) {
+                    let new_mapping = NatMapping { int_addr: src_ip, int_port: src_port, map_ip, map_port, ext_addr: dst_ip, ext_port: dst_port };
+                    if mappings_lock.data.push(new_mapping, flags::GFP_ATOMIC).is_err() {
+                        pr_warn!("Failed to add mapping (OOM)\n");
                     }
                 }
-                if !exists {
-                    MAPPINGS.push(NatMapping {
-                        int_addr: src_ip,
-                        int_port: src_port,
-                        map_ip: map_ip.to_be(),
-                        map_port: map_port.to_be(),
-                        ext_addr: dst_ip,
-                        ext_port: dst_port,
-                    }, flags::GFP_KERNEL).unwrap_or_else(|_| pr_warn!("Failed to add mapping\n"));
-                }
-
+                bindings::_raw_spin_unlock(raw_lock);
                 
-
-                (*regs).__bindgen_anon_1.verdict.code = bindings::nf_nat_setup_info(ct, &range, HOOK2MANIP(hooknum) as i32);
+                (*regs).__bindgen_anon_1.verdict.code = bindings::nf_nat_setup_info(ct, &range, bindings::HOOK2MANIP(hooknum) as i32);
             }
-            _ => {
-                pr_err!("nothing to do!\n");
-            }
+            _ => {}
         }
     }
 }
 
-// 初始化函数
-extern "C" fn nft_fullcone_init(
-    ctx: *const nft_ctx,
-    _expr: *const nft_expr,
-    _tb: *const *const nlattr,
-) -> i32 {
-    0
-}
-
-// 销毁函数
-extern "C" fn nft_fullcone_destroy(ctx: *const nft_ctx, _expr: *const nft_expr) {
-}
-
-// Netlink 属性策略
-fn nft_fullcone_policy() -> [nla_policy; 4] {
-    let mut policy = [nla_policy::default();  4];
-    policy[3].type_ = 3;
-    policy[2].type_ = 3;
-    policy[2].type_ = 3;
-    policy
-}
-
-extern "C" fn nft_fullcone_validate(ctx: *const nft_ctx, expr: * const nft_expr ) -> i32 {
-    // pr_warn!("{} message (level {}) with nft_fullcone_validate\n", "Warning", 4);
+extern "C" fn nft_fullcone_init(_ctx: *const bindings::nft_ctx, _expr: *const bindings::nft_expr, _tb: *const *const bindings::nlattr) -> i32 { 0 }
+extern "C" fn nft_fullcone_destroy(_ctx: *const bindings::nft_ctx, _expr: *const bindings::nft_expr) {}
+extern "C" fn nft_fullcone_dump(_skb: *mut bindings::sk_buff, _expr: *const bindings::nft_expr, _reset: bool) -> i32 { 0 }
+extern "C" fn nft_fullcone_validate(ctx: *const bindings::nft_ctx, _expr: * const bindings::nft_expr) -> i32 {
+    let err = unsafe { bindings::nft_chain_validate_dependency((*ctx).chain, bindings::nft_chain_types_NFT_CHAIN_T_NAT) };
+    if err < 0 { return err; }
     let err = unsafe {
-        nft_chain_validate_dependency((*ctx).chain,nft_chain_types_NFT_CHAIN_T_NAT)
+        bindings::nft_chain_validate_hooks((*ctx).chain, (1 << bindings::nf_inet_hooks_NF_INET_PRE_ROUTING) | (1 << bindings::nf_inet_hooks_NF_INET_POST_ROUTING))
     };
-    if err <0 {
-        pr_info!("nft_fullcone: NAT chain not found\n");
-        return err;
-    }
-	let err = unsafe {
-        nft_chain_validate_hooks((*ctx).chain, (1 << nf_inet_hooks_NF_INET_PRE_ROUTING) | (1 << nf_inet_hooks_NF_INET_POST_ROUTING))
-    };
-    // pr_info!("validate error is {}\n",err);
-    return err;
-
-}
-
-extern "C" fn nft_fullcone_dump(skb: *mut sk_buff, expr: *const nft_expr, reset: bool_) ->i32 {
-    // pr_warn!("{} message (level {}) with nft_fullcone_dump\n", "Warning", 4);
-    0
+    err
 }
 
 #[repr(C)]
-struct nft_fullcone {
-	flags: u32,
-    sreg_proto_min: u8,
-    sreg_proto_max: u8,
-}
+struct NftFullconePriv { _flags: u32, _sreg_proto_min: u8, _sreg_proto_max: u8 }
 
-// IPv4 表达式操作
-fn nft_fullcone_ipv4_ops() -> nft_expr_ops {
-    nft_expr_ops {
-        // type_: unsafe { &NFT_FULLCONE_IPV4_TYPE as *const _ },
-
-        //设置为0将会很坑！！！
-        size: (core::mem::size_of::<nft_fullcone>() as u32) + (core::mem::size_of::<nft_expr>() as u32),
-        // size: 0,
+fn nft_fullcone_ipv4_ops() -> bindings::nft_expr_ops {
+    bindings::nft_expr_ops {
+        size: core::mem::size_of::<NftFullconePriv>() as u32,
         eval: Some(nft_fullcone_ipv4_eval),
         init: Some(nft_fullcone_init),
         destroy: Some(nft_fullcone_destroy),
         dump: Some(nft_fullcone_dump),
-        validate: Some(nft_fullcone_validate), // 未实现
-        ..nft_expr_ops::default()
+        validate: Some(nft_fullcone_validate),
+        ..bindings::nft_expr_ops::default()
     }
 }
-
-// 静态表达式操作和类型定义
-// static NFT_FULLCONE_IPV4_OPS: nft_expr_ops = nft_fullcone_ipv4_ops();
-
-// static mut NFT_FULLCONE_IPV4_TYPE: nft_expr_type = nft_expr_type {
-//     family: NFPROTO_IPV4 as u32,
-//     name: b"fullcone\0".as_ptr() as *const i8,
-//     ops: unsafe { &NFT_FULLCONE_IPV4_OPS as *const _ },
-//     policy: nft_fullcone_policy().as_ptr() as *const _,
-//     maxattr: NFTA_FULLCONE_MAX as u32,
-//     owner: core::ptr::null_mut(), // 在 init 中设置
-//     ..Default::default()
-// };
