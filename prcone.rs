@@ -13,7 +13,6 @@ module! {
     license: "GPL",
 }
 
-// 定义 NAT 映射结构体
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 struct NatMapping {
@@ -25,16 +24,13 @@ struct NatMapping {
     ext_port: u16,      // 外部端口 (big-endian)
 }
 
-// 使用底层的 C spinlock 来包装 KVec
 struct LockedKVec {
     lock: bindings::spinlock_t,
     data: KVec<NatMapping>,
 }
 
-// 全局裸指针，用于存储带锁的映射表
 static mut MAPPINGS: *mut LockedKVec = core::ptr::null_mut();
 
-// 模块主结构体
 struct NftPrconeModule {
     expr_type_ptr: u64,
     expr_ops_ptr: u64,
@@ -94,7 +90,6 @@ impl kernel::Module for NftPrconeModule {
             }
             return Err(kernel::error::Error::from_errno(ret));
         }
-
         pr_info!("nft_prcone: module initialized successfully\n");
         
         Ok(NftPrconeModule {
@@ -168,7 +163,6 @@ extern "C" fn nft_prcone_ipv4_eval(_expr: *const bindings::nft_expr, regs: *mut 
                 let dst_port = ct_tuple_origin.dst.u.udp.port;
                 
                 bindings::_raw_spin_lock(raw_lock);
-                // Port-Restricted Cone NAT 逻辑
                 let found = mappings_lock.data.iter()
                     .find(|m| m.map_ip == dst_ip && m.map_port == dst_port && m.ext_addr == src_ip && m.ext_port == src_port)
                     .copied();

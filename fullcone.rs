@@ -52,7 +52,6 @@ impl kernel::Module for NftFullconeModule {
             MAPPINGS = KBox::into_raw(locked_kvec);
             let name = b"nft_fullcone_lock\0".as_ptr();
             
-            // 修复: 使用 `&raw mut` 来创建裸指针，而不是 `&mut`
             bindings::__spin_lock_init(
                 &mut (*MAPPINGS).lock,
                 name,
@@ -72,7 +71,6 @@ impl kernel::Module for NftFullconeModule {
         expr_type.family = bindings::NFPROTO_IPV4 as u8;
         expr_type.maxattr = 3;
 
-        // 修复: 移除编译器抱怨的多余的 unsafe 块
         expr_type.owner = &raw mut bindings::__this_module as *mut _ ;
         
         expr_ops.type_ = &*expr_type;

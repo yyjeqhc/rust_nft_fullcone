@@ -25,16 +25,13 @@ struct NatMapping {
     ext_port: u16,      // 外部端口 (big-endian)
 }
 
-// 使用底层的 C spinlock 来包装 KVec
 struct LockedKVec {
     lock: bindings::spinlock_t,
     data: KVec<NatMapping>,
 }
 
-// 全局裸指针，用于存储带锁的映射表
 static mut MAPPINGS: *mut LockedKVec = core::ptr::null_mut();
 
-// 模块主结构体，只存储指针的整数表示以满足 Send + Sync
 struct NftRconeModule {
     expr_type_ptr: u64,
     expr_ops_ptr: u64,
@@ -45,16 +42,13 @@ impl kernel::Module for NftRconeModule {
     fn init(_module: &'static ThisModule) -> Result<Self> {
         pr_info!("nft_rcone: module being initialized\n");
         
-        // 为锁准备静态的 lock_class_key
         static mut MAPPINGS_KEY: bindings::lock_class_key = unsafe { core::mem::zeroed() };
         
-        // 初始化带锁的 KVec
         let locked_kvec = KBox::new(LockedKVec {
             lock: unsafe { core::mem::zeroed() }, 
             data: KVec::new(),
         }, flags::GFP_KERNEL)?;
 
-        // 将其泄漏为裸指针并存储在全局变量中，然后初始化锁
         unsafe {
             MAPPINGS = KBox::into_raw(locked_kvec);
             let name = b"nft_rcone_lock\0".as_ptr();
@@ -65,33 +59,27 @@ impl kernel::Module for NftRconeModule {
             );
         }
 
-        // 创建 nftables 表达式相关的结构体
         let policy = KBox::new([bindings::nla_policy::default(); 4], flags::GFP_KERNEL)?;
         let mut expr_ops = KBox::new(nft_rcone_ipv4_ops(), flags::GFP_KERNEL)?;
         let mut expr_type = KBox::new(bindings::nft_expr_type::default(), flags::GFP_KERNEL)?;
 
         let policy_ptr_raw = KBox::into_raw(policy);
         
-        // 填充 expr_type 字段
         expr_type.ops = &*expr_ops;
         expr_type.policy = policy_ptr_raw as *const _; 
-        expr_type.name = b"rcone\0".as_ptr(); // 模块名
+        expr_type.name = b"rcone\0".as_ptr();
         expr_type.family = bindings::NFPROTO_IPV4 as u8;
         expr_type.maxattr = 3; 
         expr_type.owner =  &raw mut bindings::__this_module as *mut _ ;
         
-        // 建立 ops 和 type 之间的循环引用
         expr_ops.type_ = &*expr_type;
         
-        // 将 KBox 泄漏为裸指针以便存储
         let expr_type_ptr_raw = KBox::into_raw(expr_type);
         let expr_ops_ptr_raw = KBox::into_raw(expr_ops);
 
-        // 注册表达式
         let ret = unsafe { bindings::nft_register_expr(expr_type_ptr_raw) };
         if ret != 0 {
             pr_err!("nft_rcone: failed to register expression: {}\n", ret);
-            // 注册失败时，清理所有已分配的资源
             unsafe {
                 if !MAPPINGS.is_null() {
                     let _ = KBox::from_raw(MAPPINGS);
@@ -118,15 +106,12 @@ impl Drop for NftRconeModule {
     fn drop(&mut self) {
         pr_info!("nft_rcone: module being removed\n");
         unsafe {
-            // 首先注销表达式
             bindings::nft_unregister_expr(self.expr_type_ptr as *mut bindings::nft_expr_type);
             
-            // 然后通过 KBox::from_raw 回收所有内存
             let _ = KBox::from_raw(self.expr_type_ptr as *mut bindings::nft_expr_type);
             let _ = KBox::from_raw(self.expr_ops_ptr as *mut bindings::nft_expr_ops);
             let _ = KBox::from_raw(self.policy_ptr as *mut [bindings::nla_policy; 4]);
 
-            // 最后清理全局映射表
             if !MAPPINGS.is_null() {
                 let _ = KBox::from_raw(MAPPINGS);
                 MAPPINGS = core::ptr::null_mut();
@@ -136,7 +121,6 @@ impl Drop for NftRconeModule {
     }
 }
 
-// 获取设备IP地址
 fn get_device_ip(device: &bindings::net_device) -> u32 {
     unsafe {
         bindings::__rcu_read_lock();
@@ -150,20 +134,16 @@ fn get_device_ip(device: &bindings::net_device) -> u32 {
     }
 }
 
-// 简单端口选择逻辑
 fn get_proper_port(src_port: u16) -> u16 {
-    // 端口已是网络字节序
     if src_port == 0 { 1024u16.to_be() } else { src_port }
 }
 
-// IPv4 rcone 评估函数
 #[allow(non_upper_case_globals)]
 extern "C" fn nft_rcone_ipv4_eval(_expr: *const bindings::nft_expr, regs: *mut bindings::nft_regs, pkt: *const bindings::nft_pktinfo) {
     unsafe {
         if MAPPINGS.is_null() { return; }
         let mappings_lock = &mut *MAPPINGS;
         
-        // 将 spinlock_t 指针强制转换为 raw_spinlock_t 指针
         let raw_lock = &mut (*mappings_lock).lock as *mut bindings::spinlock_t as *mut bindings::raw_spinlock_t;
         
         let mut range = bindings::nf_nat_range2::default();
@@ -218,7 +198,6 @@ extern "C" fn nft_rcone_ipv4_eval(_expr: *const bindings::nft_expr, regs: *mut b
                 range.max_proto = range.min_proto;
 
                 bindings::_raw_spin_lock(raw_lock);
-                // 检查是否已存在此内部地址的映射
                 if !mappings_lock.data.iter().any(|m| m.int_addr == src_ip && m.int_port == src_port) {
                     let new_mapping = NatMapping {
                         int_addr: src_ip, int_port: src_port,
@@ -237,8 +216,6 @@ extern "C" fn nft_rcone_ipv4_eval(_expr: *const bindings::nft_expr, regs: *mut b
         }
     }
 }
-
-// --- 剩余的回调函数和结构体定义 ---
 
 extern "C" fn nft_rcone_init(_ctx: *const bindings::nft_ctx, _expr: *const bindings::nft_expr, _tb: *const *const bindings::nlattr) -> i32 { 0 }
 extern "C" fn nft_rcone_destroy(_ctx: *const bindings::nft_ctx, _expr: *const bindings::nft_expr) {}
